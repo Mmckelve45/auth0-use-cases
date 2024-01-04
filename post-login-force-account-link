@@ -1,0 +1,138 @@
+/**
+ * This function uses client credentials flow to get a M2M token to call the management API with.
+ */
+async function getM2MToken(event, axios) {
+  // Get M2M token through Client Credentials Flow
+    var options = {
+      method: "POST",
+      url: `https://${event.secrets.domain}/oauth/token`,
+      headers: {
+        "content-type": "application/json",
+      },
+      data: {
+        grant_type: "client_credentials",
+        // Client ID and Secret of your M2M application or in my case my Regular Web App
+        // My regular web app is enabled to perform minimum functions (scopes) on the Management API
+        client_id: `${event.secrets.clientId}`,
+        client_secret: `${event.secrets.clientSecret}`,
+        audience: `https://${event.secrets.domain}/api/v2/`,
+      },
+    };
+    // Extract 'access_token' out of response
+    let newToken = await axios
+      .request(options)
+      .then(async function (response) {
+        return await response.data["access_token"];
+      })
+      .catch(function (error) {
+        console.error(error);
+      });
+
+    return newToken;
+}
+
+/**
+ * Calls the management api and links the old existing user into the new current user.
+ */
+async function linkUserAccounts(event, newToken, fullTargetId, axios) {
+    var options = {
+    method: 'POST',
+    url: `https://${event.secrets.domain}/api/v2/users/${fullTargetId}/identities`,
+    headers: {
+      'Content-Type': 'application/json', 
+      'Accept': 'application/json',
+      authorization: `Bearer ${newToken}`
+    },
+    data: {
+      "provider": event.connection.strategy,
+      "connection_id": event.connection.id,
+      "user_id": event.user.user_id
+    }
+  };
+
+  await axios.request(options).then(function (response) {
+    console.log(response.data);
+  }).catch(function (error) {
+    console.error(error);
+  });
+}
+
+/**
+* Handler that will be called during the execution of a PostLogin flow.
+*
+* @param {Event} event - Details about the user and the context in which they are logging in.
+* @param {PostLoginAPI} api - Interface whose methods can be used to change the behavior of the login.
+*/
+exports.onExecutePostLogin = async (event, api) => {
+    const { ManagementClient } = require("auth0");
+    var axios = require("axios").default;
+    if (!event.user.email_verified) {
+    // We won't process users for account linking until they have verified their email address.
+      return;
+    }
+
+
+    if (event.stats.logins_count !== 1) {
+      // Account linking has already been processed and completed for this user. No further work
+      // to be done in this Action.
+      return;
+    }
+
+    // Create Management API client to search for users with the same email address
+    const management = new ManagementClient({
+        domain: event.secrets.domain,
+        clientId: event.secrets.clientId,
+        clientSecret: event.secrets.clientSecret,
+    });
+
+    // Search for other candidate users
+    const { data: candidateUsers } = await management.usersByEmail.getByEmail({
+      email: event.user.email,
+    });
+
+    // Only one user is returned then no linking necessary
+    if (!Array.isArray(candidateUsers)) {
+      return;
+    }
+
+    // Get the identities of the user
+    const candidateIdentities = candidateUsers.flatMap((user) => user.identities);
+    if(candidateIdentities.length <= 1) return;
+  
+
+    // Get M2M token through Client Credentials Flow
+    let newToken = await getM2MToken(event, axios);
+    
+    // Returns the candidate that already exists (old identity).
+    const oldIdentity = candidateIdentities.find(
+      (identity) => identity.provider !== event.connection.strategy
+    );
+
+    // UserID does not contain github|, or auth0|, or google by default
+    const targetProvider = oldIdentity.provider;
+    const targetId = oldIdentity.user_id;
+    const fullTargetId = targetProvider + "|" + targetId
+ 
+    // Call Management API for Account Link with M2M token from above.
+    // Linking the old user into the new one.
+    await linkUserAccounts(event, newToken, fullTargetId, axios);
+
+    if(event.connection.strategy === 'auth0'){
+      api.redirect.sendUserTo(`https://${event.secrets.appDomain}/api/auth/login?connection=${oldIdentity.connection}`)
+      // If you want to prompt the user to sign in with username/password again.
+      // api.redirect.sendUserTo(`http://localhost:3000/api/auth/login?connection=${event.connection.name}`)
+    } else {
+      api.redirect.sendUserTo(`https://${event.secrets.appDomain}/api/auth/login?connection=${event.connection.strategy}`);
+    }
+};
+
+
+/**
+* Handler that will be invoked when this action is resuming after an external redirect. If your
+* onExecutePostLogin function does not perform a redirect, this function can be safely ignored.
+*
+* @param {Event} event - Details about the user and the context in which they are logging in.
+* @param {PostLoginAPI} api - Interface whose methods can be used to change the behavior of the login.
+*/
+// exports.onContinuePostLogin = async (event, api) => {
+// };
