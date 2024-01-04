@@ -1,0 +1,105 @@
+/**
+ * This function uses client credentials flow to get a M2M token to call the management API with.
+ */
+async function getM2MToken(event, axios) {
+  // Get M2M token through Client Credentials Flow
+    var options = {
+      method: "POST",
+      url: `https://${event.secrets.domain}/oauth/token`,
+      headers: {
+        "content-type": "application/json",
+      },
+      data: {
+        grant_type: "client_credentials",
+        // Client ID and Secret of your M2M application or in my case my Regular Web App
+        // My regular web app is enabled to perform minimum functions (scopes) on the Management API
+        client_id: `${event.secrets.clientId}`,
+        client_secret: `${event.secrets.clientSecret}`,
+        audience: `https://${event.secrets.domain}/api/v2/`,
+      },
+    };
+    // Extract 'access_token' out of response
+    let newToken = await axios
+      .request(options)
+      .then(async function (response) {
+        return await response.data["access_token"];
+      })
+      .catch(function (error) {
+        console.error(error);
+      });
+
+    return newToken;
+}
+
+
+async function sendEmailVerification(event, newToken, axios) {
+    var options = {
+      method: 'POST',
+      url: `https://${event.secrets.domain}/api/v2/jobs/verification-email`,
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${newToken}`
+      },
+      data: {
+        user_id: event.user.user_id,
+        client_id: event.secrets.clientId,
+      }
+    };
+
+    axios.request(options).then(function (response) {
+      console.log(response.data);
+    }).catch(function (error) {
+      console.error(error);
+    });
+}
+
+
+/**
+* Handler that will be called during the execution of a PostLogin flow.
+*
+* @param {Event} event - Details about the user and the context in which they are logging in.
+* @param {PostLoginAPI} api - Interface whose methods can be used to change the behavior of the login.
+*/
+exports.onExecutePostLogin = async (event, api) => {
+  if (!event.user.email_verified) {
+    // Choosing to redirect user in my application based on deny message
+    api.access.deny('Please verify your email before logging in.');
+
+    // If there is currently no lastEmailSent, they just signed up. They get a welcome email.
+    if(!event.user.app_metadata?.lastEmailSent) {
+      api.user.setAppMetadata("lastEmailSent", Date.now());
+      return;
+    }
+
+    const savedTimestamp = event.user.app_metadata.lastEmailSent
+    const currentTimestamp = Date.now(); // Current timestamp in milliseconds
+
+    // No point in having someone spam our SMTP provider for emails
+    // Check if the current timestamp is within 30 seconds of the saved timestamp
+    if (Math.abs(currentTimestamp - savedTimestamp) <= 30000) {
+      return;
+    } else {
+      api.user.setAppMetadata("lastEmailSent", Date.now());
+    }
+    
+    var axios = require("axios").default;
+    // Get M2M token through Client Credentials Flow
+    let newToken = await getM2MToken(event, axios);
+    
+ 
+    // Call Management API for Email Verification Request with M2M token from above
+    sendEmailVerification(event, newToken, axios);
+  }
+  
+};
+
+
+/**
+* Handler that will be invoked when this action is resuming after an external redirect. If your
+* onExecutePostLogin function does not perform a redirect, this function can be safely ignored.
+*
+* @param {Event} event - Details about the user and the context in which they are logging in.
+* @param {PostLoginAPI} api - Interface whose methods can be used to change the behavior of the login.
+*/
+// exports.onContinuePostLogin = async (event, api) => {
+// };
